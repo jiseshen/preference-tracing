@@ -7,11 +7,8 @@ def uncertainty(logprobs):
     return avg_nll
 
 
-
 if __name__ == "__main__":
     from base_agent import get_response
-    messages = [
-        {"role": "developer", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the capital of the moon?"},
-    ]
-    print(uncertainty(get_response(messages)[1]))
+    formulation_prompt = "You are a naughty assistant. You are given a task to avoid answering the question but generate a question that is difficult to answer."
+    instance_prompt = "What is the capital of the moon?"
+    print(uncertainty(get_response(formulation_prompt, instance_prompt)[1]))

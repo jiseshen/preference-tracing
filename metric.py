@@ -8,7 +8,11 @@ def get_reward(prompt, response):
     inputs = tokenizer(prompt, response, return_tensors='pt')
     score = reward_model(**inputs).logits[0].cpu().detach()
     return score
-    
+
+def calculate_token(usage):
+    input_tokens = usage["input_tokens"]
+    output_tokens = usage["output_tokens"]
+    return input_tokens + output_tokens
 
 if __name__ == "__main__":
     from base_agent import get_response
