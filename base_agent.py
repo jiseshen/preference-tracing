@@ -4,7 +4,7 @@ import os
 
 dotenv.load_dotenv(override=True)
 
-model_id = 'gpt-4o'
+model_id = 'gpt-4.1'
 
 client = OpenAI()
 
