@@ -3,8 +3,15 @@ import numpy as np
 
 
 def parse_json_output(output):
-    json_text = output.strip("```").strip("json").strip("\n")
-    return json.loads(json_text)
+    try:
+        json_text = output.split("```json")[-1]
+        json_text = json_text.strip("```").strip("json").strip("\n")
+        return json.loads(json_text)
+    except:
+        print("~" * 100)
+        print(output)
+        print("~" * 100)
+        raise ValueError("Failed to parse output")
 
 
 def get_uncertainty(logprobs):
