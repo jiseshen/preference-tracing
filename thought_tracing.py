@@ -1,6 +1,6 @@
 from base_agent import get_response
 from utils import parse_json_output, get_uncertainty
-from prompt_templates import *
+from thought_prompt import *
 import numpy as np
 
 
@@ -12,9 +12,8 @@ class ThoughtTracing:
         rejuvenate_prompt,
         summary_prompt,
         CoT_prompt,
-        conclusion_prompt,
+        conclusion_prompt=None,
         parse_prompt=None,
-        perception_prompt=None,
         base_model='gpt-4.1',
         temperature=0.2,
         uncertainty_threshold=0.2,
@@ -30,7 +29,6 @@ class ThoughtTracing:
         self.CoT_prompt = CoT_prompt
         self.conclusion_prompt = conclusion_prompt
         self.parse_prompt = parse_prompt
-        self.perception_prompt = perception_prompt
         self.history = ""
         self.trajectory = []
         self.knowledge = ""
@@ -43,31 +41,55 @@ class ThoughtTracing:
         self.N = N
         self.max_steps = max_steps
         self.avg_uncertainty = 0
-        
+        self.trace_count = 0
+
     def _wrap_get_response(self):
-        def get_response_tracked(formulation_prompt, instance_prompt, **kwargs):
+        def get_response_tracked(formulation_prompt, instance_prompt, track_usage=True, **kwargs):
             response, logprobs, usage = get_response(
                 formulation_prompt, instance_prompt, model_id=self.model_id, **kwargs)
-            self.prompt_tokens += usage.prompt_tokens
-            self.completion_tokens += usage.completion_tokens
+            if track_usage:
+                self.prompt_tokens += usage.prompt_tokens
+                self.completion_tokens += usage.completion_tokens
             return response, logprobs, usage
         return get_response_tracked
 
     def preprocess(self, input):
-        output, _, _ = self.get_response(self.parse_prompt, input)
-        output = parse_json_output(output)
-        self.trajectory = output["Trajectory"]
-        self.knowledge = output["Knowledge"]
+        if self.parse_prompt:
+            output, _, _ = self.get_response(self.parse_prompt, input)
+            output = parse_json_output(output)
+            self.trajectory = output["Trajectory"]
+            self.knowledge = output["Knowledge"]
+        else:
+            self.trajectory = input
+            self.knowledge = ""
 
-    def CoT_update(self, p, a):
-        instance = f"Knowledge: {self.knowledge}, History: {self.history}, Perception: {p}, Action: {a}"
+    def format_instance(self, kind, **kwargs):
+        fields = {
+            "Knowledge": self.knowledge,
+            "History": self.history,
+            "Hypotheses": self.hypotheses,
+            "Hypotheses and Weights": [(h, w) for h, w in zip(self.hypotheses, self.weight)],
+        }
+        fields.update(kwargs)
+        instances = {
+            "CoT": ["Knowledge", "History", "Perception", "Action"],
+            "hypothesis": ["Knowledge", "History", "Perception", "Action", "Hypotheses"],
+            "summary": ["Hypotheses and Weights", "History"],
+            "rejuvenate": ["Knowledge", "Hypotheses"],
+            "conclusion": ["Knowledge", "History", "Query"],
+        }
+        return ", ".join([f"{i}: {fields[i]}" for i in instances[kind]])
+
+    def CoT_update(self, **kwargs):
+        instance = self.format_instance("CoT", **kwargs)
         summary, logprobs, _ = self.get_response(self.CoT_prompt, instance)
         uncertainty = get_uncertainty(logprobs)
         summary = parse_json_output(summary)
         return summary["Thought"], uncertainty
 
-    def hypothesis_update(self, p, a):
-        instance = f"Knowledge: {self.knowledge}, History: {self.history}, Perception: {p}, Action: {a}, Hypotheses: {self.hypotheses}"
+    def hypothesis_update(self, **kwargs):
+        self.trace_count += 1
+        instance = self.format_instance("hypothesis", **kwargs)
         hypotheses, _, _ = self.get_response(self.hypothesis_prompt, instance)
         hypotheses = parse_json_output(hypotheses)["Hypotheses"]
         self.hypotheses = [i["Hypothesis"] for i in hypotheses]
@@ -75,7 +97,7 @@ class ThoughtTracing:
         self.weight = np.array(self.weight) / np.sum(self.weight)
 
     def summary_hypotheses(self):
-        instance = f"Hypotheses and Weights: {[(h, i) for h, i in zip(self.hypotheses, self.weight)]}, History: {self.history}"
+        instance = self.format_instance("summary")
         summary, _, _ = self.get_response(self.summary_prompt, instance)
         return summary
 
@@ -87,7 +109,7 @@ class ThoughtTracing:
         self.weight = np.ones(len(self.hypotheses)) / len(self.hypotheses)
 
     def rejuvenate(self):
-        instance = f"Knowledge: {self.knowledge}, Hypotheses: {self.hypotheses}"
+        instance = self.format_instance("rejuvenate")
         new_hypothesis, _, _ = self.get_response(
             self.rejuvenate_prompt, instance)
         self.hypotheses = parse_json_output(new_hypothesis)
@@ -97,7 +119,7 @@ class ThoughtTracing:
 
     def trace(self, input):
         n_cot = 0
-        self.preprocess(input) if self.parse_prompt else input
+        self.preprocess(input)
         if len(self.trajectory) > self.max_steps:
             return False
         for i, step in enumerate(self.trajectory):
@@ -106,10 +128,11 @@ class ThoughtTracing:
             uncertainty = float("inf")
             if not self.mode == "Trace":
                 n_cot += 1
-                summary, uncertainty = self.CoT_update(p, a)
-                self.avg_uncertainty += 1 / n_cot * (uncertainty - self.avg_uncertainty)
+                summary, uncertainty = self.CoT_update(Perception=p, Action=a)
+                self.avg_uncertainty += 1 / n_cot * \
+                    (uncertainty - self.avg_uncertainty)
             if not self.mode == "CoT" and uncertainty > self.uncertainty_threshold:
-                self.hypothesis_update(p, a)
+                self.hypothesis_update(Perception=p, Action=a)
                 summary = self.summary_hypotheses()
                 self.resample()
                 self.rejuvenate()
@@ -125,6 +148,7 @@ class ThoughtTracing:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.avg_uncertainty = 0
+        self.trace_count = 0
         
     def infer(self, input, query, answer):
         self.reset()

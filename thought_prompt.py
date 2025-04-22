@@ -36,7 +36,7 @@ rejuvenate_prompt = """
     You will be given a list of hypotheses, and the knowledge about the apartment.
     If they do not have enough diversity, you need to rewrite some hypotheses to make them more diverse.
     You can try change some of the objects in the hypotheses based on the knowledge.
-    However, at least one hypothesis should be kept the same.
+    However, at least one hypothesis of each similar groups should be kept the same.
     Do not change the number of hypotheses.
     You must only give in JSON format a list of Hypotheses.
 """
