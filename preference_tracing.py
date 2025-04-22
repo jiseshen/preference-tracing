@@ -1,17 +1,16 @@
-from base_agent import get_response
-from utils import parse_json_output, get_uncertainty
 from metric import get_reward
 from preference_prompt import *
-import numpy as np
 from thought_tracing import ThoughtTracing
 
 
 class PreferenceTracing(ThoughtTracing):
     def __init__(
         self,
+        online_prompt,
         **kwargs
     ):
         super().__init__(**kwargs)
+        self.online_prompt = online_prompt
         self.reward = []
 
     def format_instance(self, kind, **kwargs):
@@ -73,6 +72,7 @@ if __name__ == "__main__":
     with open("profiles_dataset.json", "r") as f:
         data = json.load(f)
     preference_tracing = PreferenceTracing(
+        online_prompt=online_prompt,
         hypothesis_prompt=hypothesis_prompt,
         rejuvenate_prompt=rejuvenate_prompt,
         summary_prompt=summary_prompt,
