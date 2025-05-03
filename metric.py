@@ -10,7 +10,7 @@ tokenizer = AutoTokenizer.from_pretrained(reward_name)
 
 def get_reward(prompt, response):
     inputs = tokenizer(prompt, response, return_tensors='pt').to(device)
-    score = reward_model(**inputs).logits[0].cpu().detach()
+    score = reward_model(**inputs).logits[0].item()
     return score
 
 if __name__ == "__main__":

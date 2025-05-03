@@ -11,7 +11,7 @@ parse_prompt = """
 
 hypothesis_prompt = """
     You will be given a description of the apartment, the agent's perception, the agent's current action, the full interaction history, and a list of hypotheses. The hypotheses represent possible beliefs and intentions of the agent — they are candidate explanations for why the agent performed a certain action. For example, a valid hypothesis could be: “Nancy believes the object she wants is in the microwave.”
-    You are expected to update the hypotheses based on all the given information. If the list of hypotheses is empty, you must carefully construct and initialize a list of up to {N} plausible hypotheses. If the situation is simple, fewer hypotheses are acceptable. If the given list appears insufficient to capture the complexity of the agent's mental state, you may expand it — but never generate more than {N} hypotheses in total.
+    You are expected to update the hypotheses based on all the given information. If the list of hypotheses is empty, you must carefully construct and initialize a list of {N} plausible hypotheses.
     When updating the hypotheses, consider the context step by step. For instance, if the agent opens the microwave and finds no salmon there, you should revise the belief accordingly. Likewise, if the agent perceives that the salmon is in the microwave but then closes it, this may indicate that the salmon is not what the agent wants, and the hypothesis should be reframed.
     Each hypothesis should be associated with a likelihood score that reflects how likely the observed action is given that belief. The likelihood should be selected on a discrete scale:
     0 = “Definitely not”
@@ -34,7 +34,7 @@ summary_prompt = """
 
 rejuvenate_prompt = """
     You will be given a list of hypotheses, and the knowledge about the apartment.
-    If they do not have enough diversity, you need to rewrite some hypotheses to make them more diverse.
+    If they lack diversity, you need to paraphrase some hypotheses to make them more diverse.
     You can try change some of the objects in the hypotheses based on the knowledge.
     However, at least one hypothesis of each similar groups should be kept the same.
     Do not change the number of hypotheses.

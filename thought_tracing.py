@@ -1,5 +1,5 @@
 from base_agent import get_response
-from utils import parse_json_output, get_uncertainty
+from utils import parse_json_output, get_uncertainty, jaccard_similarity
 from thought_prompt import *
 import numpy as np
 
@@ -80,6 +80,17 @@ class ThoughtTracing:
         }
         return ", ".join([f"{i}: {fields[i]}" for i in instances[kind]])
 
+    def check_ess(self):
+        ess = 1.0 / np.sum(self.weight ** 2)
+        return ess < len(self.hypotheses) / 2
+    
+    def check_similarity(self):
+        for i in range(len(self.hypotheses)):
+            for j in range(i + 1, len(self.hypotheses)):
+                if jaccard_similarity(self.hypotheses[i], self.hypotheses[j]) > 0.8:
+                    return True
+        return False
+    
     def CoT_update(self, **kwargs):
         instance = self.format_instance("CoT", **kwargs)
         summary, logprobs, _ = self.get_response(self.CoT_prompt, instance)
@@ -93,7 +104,8 @@ class ThoughtTracing:
         hypotheses, _, _ = self.get_response(self.hypothesis_prompt, instance)
         hypotheses = parse_json_output(hypotheses)["Hypotheses"]
         self.hypotheses = [i["Hypothesis"] for i in hypotheses]
-        self.weight = [i["Likelihood"] for i in hypotheses]
+        for i, h in enumerate(hypotheses):
+            self.weight[i] *= h["Likelihood"]
         self.weight = np.array(self.weight) / np.sum(self.weight)
 
     def summary_hypotheses(self):
@@ -134,8 +146,10 @@ class ThoughtTracing:
             if not self.mode == "CoT" and uncertainty > self.uncertainty_threshold:
                 self.hypothesis_update(Perception=p, Action=a)
                 summary = self.summary_hypotheses()
-                self.resample()
-                self.rejuvenate()
+                if self.check_ess():
+                    self.resample()
+                if self.check_similarity():
+                    self.rejuvenate()
             self.update_history(i, p, a, summary)
         return True
 

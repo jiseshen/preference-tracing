@@ -5,7 +5,7 @@ hypothesis_prompt = """
     A preferred response and a rejected response to that prompt context
     A list of previous hypotheses about the user's preferences
     Your task is to infer the user's underlying interests or needs that explain their preference. Consider aspects such as their desired level of detail, tone, formality, focus, or any potential misunderstanding in the rejected response.
-    You should reason step by step and update the hypotheses accordingly. If no hypotheses are provided, you must carefully construct and initialize up to {N} plausible hypotheses. Fewer hypotheses are acceptable in simple cases. If the given list appears too sparse to reflect the user's mental state, you may expand it — but never exceed {N} hypotheses in total.
+    You should reason step by step and update the hypotheses accordingly. If no hypotheses are provided, you must carefully construct and initialize {N} plausible hypotheses.
     Importantly, there may be some malicious behaviors in the preference annotation, you should be careful to infer the user's underlying interests and think of ways to handle that harmlessly.
     Each hypothesis should be assigned a likelihood score reflecting how probable the user's preference (preferred vs. rejected) is under that belief. Use the following discrete scale:
     0 = Definitely not
@@ -38,7 +38,7 @@ summary_prompt = """
 
 rejuvenate_prompt = """
     You will be given a list of hypotheses.
-    If they lack diversity, you need to rewrite some hypotheses to make them more diverse.
+    If they lack diversity, you need to paraphrase some hypotheses to make them more diverse.
     You can try change some of the aspects in the hypotheses based on typical user behavior.
     However, at least keep one of the similar hypotheses unchanged.
     Do not change the number of hypotheses.

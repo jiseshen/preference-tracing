@@ -59,8 +59,10 @@ class PreferenceTracing(ThoughtTracing):
                 self.hypothesis_update(
                     Context=context, Preferred=preferred, Rejected=rejected)
                 self.history = self.summary_hypotheses()
-                self.resample()
-                self.rejuvenate()
+                if self.check_ess():
+                    self.resample() 
+                if self.check_similarity():
+                    self.rejuvenate()
 
     def reset(self):
         super().reset()

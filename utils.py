@@ -20,6 +20,16 @@ def get_uncertainty(logprobs):
     return avg_nll
 
 
+def jaccard_similarity(doc1, doc2):
+    set1 = set(doc1.lower().split())
+    set2 = set(doc2.lower().split())
+    intersection = len(set1.intersection(set2))
+    union = len(set1.union(set2))
+    if union == 0:
+        return 0.0
+    return intersection / union
+
+
 if __name__ == "__main__":
     from base_agent import get_response
     formulation_prompt = "You must output JSON data that can be parsed by json.loads()."
