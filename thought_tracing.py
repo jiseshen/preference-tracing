@@ -106,9 +106,11 @@ class ThoughtTracing:
         self.hypotheses = [i["Hypothesis"] for i in hypotheses]
         if len(self.weight) == 0:
             self.weight = [i["Likelihood"] for i in hypotheses]
-        for i, h in enumerate(hypotheses):
-            self.weight[i] *= h["Likelihood"]
-        self.weight = np.array(self.weight) / np.sum(self.weight)
+        else:
+            for i, h in enumerate(hypotheses):
+                self.weight[i] *= h["Likelihood"]
+        summ = np.sum(self.weight)
+        self.weight = np.array(self.weight) / summ if summ else np.ones(len(hypotheses)) / len(hypotheses)
 
     def summary_hypotheses(self):
         instance = self.format_instance("summary")
