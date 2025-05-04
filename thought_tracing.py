@@ -104,6 +104,8 @@ class ThoughtTracing:
         hypotheses, _, _ = self.get_response(self.hypothesis_prompt, instance)
         hypotheses = parse_json_output(hypotheses)["Hypotheses"]
         self.hypotheses = [i["Hypothesis"] for i in hypotheses]
+        if len(self.weight) == 0:
+            self.weight = [i["Likelihood"] for i in hypotheses]
         for i, h in enumerate(hypotheses):
             self.weight[i] *= h["Likelihood"]
         self.weight = np.array(self.weight) / np.sum(self.weight)
