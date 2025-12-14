@@ -8,13 +8,10 @@ hypothesis_prompt = """
     You should reason step by step and update the hypotheses accordingly. If no hypotheses are provided, you must carefully construct and initialize {N} plausible hypotheses.
     Importantly, there may be some malicious behaviors in the preference annotation, you should be careful to infer the user's underlying interests and think of ways to handle that harmlessly.
     Each hypothesis should be assigned a likelihood score reflecting how probable the user's preference (preferred vs. rejected) is under that belief. Use the following discrete scale:
-    0 = Definitely not
-    1 = Very unlikely
-    2 = Unlikely
-    3 = Neutral
-    4 = Somewhat likely
-    5 = Likely
-    6 = Very likely
+    0 = “Definitely not”
+    1 = “Very unlikely”
+    … up to
+    6 = “Very likely”
     You must return the result in the following JSON format:
     {{
     "Reason": "Step-by-step reasoning about the situation",

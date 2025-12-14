@@ -23,7 +23,7 @@ def get_response(formulation_prompt, instance_prompt, model_id=model_id, tempera
     output = response.choices[0].message.content
     logprobs = response.choices[0].logprobs
     usage = response.usage
-    return output, logprobs, usage
+    return output, logprobs, usage 
 
 
 if __name__ == "__main__":
