@@ -56,13 +56,23 @@ class PreferenceTracer:
         )
         return reset
 
-    def initialize_hypotheses(self, user_id: str, conversation_history: List[Dict], candidates: List[Union[Dict, str]]) -> HypothesesSetV3:
+    def initialize_hypotheses(self, user_id: str, conversation_history: List[Dict], candidates: List[Union[Dict, str]], chosen_response: Union[Dict, str]) -> HypothesesSetV3:
         history_str = self.format_conversation_history(conversation_history)
-        candidates_str = self.format_candidates(candidates)
+        candidates_str = self.format_candidates(candidates, include_chosen=True, chosen_text=chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', ''))
+        chosen_text = chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', '')
         
-        context_input = f"<conversation history>\n{history_str}\n</conversation history>\n\n<current responses>\n{candidates_str}\n</current responses>"
+        context_input = (
+            f"<conversation history>\n{history_str}\n</conversation history>\n\n"
+            f"<response candidates>\n{candidates_str}\n</response candidates>\n\n"
+            f"<user chosen response>\n{chosen_text}\n</user chosen response>"
+        )
         
-        prompt = f"{context_input}\n\nGenerate a numbered list of {self.args.n_hypotheses} hypotheses about the user's preferences, values, and communication style that would explain their response choice. Focus on what matters to this user in AI conversations."
+        prompt = (
+            f"{context_input}\n\n"
+            f"Compare the chosen response against the other candidates to infer what the user prefers. "
+            f"Generate a numbered list of {self.args.n_hypotheses} hypotheses about the user's preferences, values, and communication style that best explain why they chose this response over the alternatives. "
+            f"Be specific about comparative signals (tone, detail level, safety, helpfulness, directness)."
+        )
         
         should_print = self.args.print if hasattr(self.args, 'print') else False
         
@@ -93,21 +103,30 @@ class PreferenceTracer:
             weights=weights
         )
 
-    def propagate_hypotheses(self, existing_hypotheses: HypothesesSetV3, conversation_history: List[Dict], candidates: List[Union[Dict, str]]) -> HypothesesSetV3:
+    def propagate_hypotheses(self, existing_hypotheses: HypothesesSetV3, conversation_history: List[Dict], candidates: List[Union[Dict, str]], chosen_response: Union[Dict, str], user_query: str) -> HypothesesSetV3:
         history_str = self.format_conversation_history(conversation_history)
-        candidates_str = self.format_candidates(candidates)
+        candidates_str = self.format_candidates(candidates, include_chosen=True, chosen_text=chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', ''))
+        chosen_text = chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', '')
         
-        new_context = f"<conversation history>\n{history_str}\n</conversation history>\n\n<current responses>\n{candidates_str}\n</current responses>"
+        new_context = (
+            f"<conversation history>\n{history_str}\n</conversation history>\n\n"
+            f"<user message>\n{user_query}\n</user message>\n\n"
+            f"<current responses>\n{candidates_str}\n</current responses>\n\n"
+            f"<user chosen response>\n{chosen_text}\n</user chosen response>"
+        )
         
         if self.args.print if hasattr(self.args, 'print') else False:
             print(Panel("[bold yellow]Propagating hypotheses...[/bold yellow]", style="yellow"))
         
         propagation_prompts = [
-            f"<previous preference>\n{hypothesis}\n</previous preference>\n\n<new context>\n{new_context}\n</new context>\n\nQuestion: Based on the previous hypothesis and new conversation context, what are the user's updated preferences and values? Provide a refined hypothesis."
+            f"<previous preference>\n{hypothesis}\n</previous preference>\n\n<new context>\n{new_context}\n</new context>\n\n"
+            f"Compare the chosen response against the other candidates and reason about the user's choice. "
+            f"Update the hypothesis to make it consistent to the new context. Keep the conciseness and main idea of the previous hypothesis. "
+            f"Only output the updated hypothesis without any additional explanation."
             for hypothesis in existing_hypotheses.texts
         ]
         
-        propagated_texts = self.tracer_model.batch_interact(propagation_prompts, temperature=0.3, max_tokens=256)
+        propagated_texts = self.tracer_model.batch_interact(propagation_prompts, temperature=0.3, max_tokens=128)
         
         new_contexts = existing_hypotheses.contexts + [{'candidates': candidates}]
         new_perceptions = existing_hypotheses.perceptions + [{'perception': f'turn_{len(existing_hypotheses.contexts)}', 'input_candidates': candidates_str}]
@@ -123,18 +142,12 @@ class PreferenceTracer:
             propagated_outputs=propagated_texts
         )
 
-    def weigh_hypotheses(self, hypotheses: HypothesesSetV3, chosen_response: Union[Dict, str], candidates: List[Union[Dict, str]]) -> Dict:
+    def weigh_hypotheses(self, hypotheses: HypothesesSetV3, chosen_response: Union[Dict, str], candidates: List[Union[Dict, str]], user_query: str) -> Dict:
         chosen_content = chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', '')
         candidates_str = self.format_candidates(candidates, include_chosen=True, chosen_text=chosen_content)
         
         if self.args.print if hasattr(self.args, 'print') else False:
             print(Panel("[bold magenta]Weighing hypotheses based on user choice...[/bold magenta]", style="magenta"))
-        
-        system_prompt = (
-            "You evaluate how likely a user would choose a specific response given their preference. "
-            "Format your answer as brief reasoning followed by a final line exactly: 'Answer: <the answer letter>'. "
-            "Only one final Answer line; do not include any other 'Answer:' occurrences."
-        )
         
         word_mapping = {
             'a': "Very Likely (90%)", 
@@ -145,40 +158,42 @@ class PreferenceTracer:
             'f': "Very Unlikely (<5%)"
         }
         score_mapping = {'a': 3, 'b': 2.5, 'c': 2, 'd': 1, 'e': 0.5, 'f': 0.001}
-        
         options_str = "\n".join([f"({k}) {v}" for k, v in word_mapping.items()])
+        
+        system_prompt = (
+            "You evaluate how likely a user would choose a specific response given their preference. "
+            f"Use the provided options exactly: {options_str}. "
+            "Briefly compare the chosen response to the other candidates from the perspective of this hypothesis and reason how likely the user would choose it."
+            "Then output a single final line exactly: 'Answer: <the answer letter>'. Only one final Answer line; do not include any other 'Answer:' occurrences."
+        )
         
         likelihood_prompts = []
         for hypothesis in hypotheses.texts:
             prompt = (
+                f"<user message>\n{user_query}\n</user message>\n\n"
                 f"<preference>\n{hypothesis}\n</preference>\n\n"
                 f"<available responses>\n{candidates_str}\n</available responses>\n\n"
                 f"<chosen response>\n{chosen_content}\n</chosen response>\n\n"
-                f"Question: Given this hypothesis, analyze briefly (<=3 sentences) how well the chosen response matches. "
-                f"Then output a single final line with one of: {options_str}.\n"
+                f"How likely would it be that the user choose this response given their preference as described?"
             )
             likelihood_prompts.append(prompt)
         
-        raw_predictions = self.tracer_model.batch_interact(likelihood_prompts, temperature=0, system_prompts=system_prompt, max_tokens=256)
+        raw_predictions = self.tracer_model.batch_interact(likelihood_prompts, temperature=0, system_prompts=system_prompt, max_tokens=128)
         
         reasonings = []
         answers = []
         for response in raw_predictions:
             reasoning = response.strip()
-            option_letter = 'c'
+            option_letter = self.extract_option_letter(response)
             if 'Answer:' in response or 'answer:' in response:
                 parts = re.split(r'(?i)answer:', response, maxsplit=1)
                 reasoning = parts[0].strip()
-                answer_segment = parts[1].strip()
-                match = re.search(r'\(([a-f])\)', answer_segment.lower())
-                if match:
-                    option_letter = match.group(1)
             reasonings.append(reasoning)
             answers.append(option_letter)
         
         raw_scores = np.array([self.map_response_to_score(a, score_mapping) for a in answers])
         # Cumulative update: combine previous weights as prior with new likelihood scores
-        prior = hypotheses.weights if hasattr(hypotheses, 'weights') and hypotheses.weights is not None else np.ones(len(raw_scores)) / len(raw_scores)
+        prior = hypotheses.weights
         eps = 1e-12
         log_prior = np.log(prior + eps)
         combined = log_prior + raw_scores  # log posterior up to additive constant
@@ -198,11 +213,22 @@ class PreferenceTracer:
             'weights': weights
         }
 
+    def extract_option_letter(self, response: str, default: str = 'c') -> str:
+        """Extract an option letter (a-f) from a model response, accepting parentheses or plain letters."""
+        answer_sections = re.findall(r'(?i)answer:\s*(.*)', response)
+        search_space = answer_sections[-1] if answer_sections else response
+        match = re.search(r'\(([a-f])\)', search_space, re.IGNORECASE) or re.search(r'\b([a-f])\b', search_space, re.IGNORECASE)
+        return match.group(1).lower() if match else default
+
     def map_response_to_score(self, response: str, mapping: dict) -> float:
+        letter = response.strip().lower()
+        match = re.search(r'\b([a-f])\b', letter)
+        if match and match.group(1) in mapping:
+            return mapping[match.group(1)]
         for option in mapping.keys():
-            if response.startswith(f"({option})") or response.startswith(f"{option})") or response.startswith(f"{option}.") or option in response[:3]:
+            if letter.startswith(f"({option})") or letter.startswith(f"{option})") or letter.startswith(f"{option}."):
                 return mapping[option]
-        return 0.5
+        return mapping.get('c', 0.5)
 
     def summarize_hypotheses(self, hypotheses: HypothesesSetV3) -> str:
         weighted_hypotheses = "\n".join([f"- {text} (weight: {weight:.3f})" for text, weight in zip(hypotheses.texts, hypotheses.weights)])
@@ -238,38 +264,111 @@ class PreferenceTracer:
         
         return existing_hypotheses
 
-    def evaluate_generation(self, user_profile: str, conversation_history: List[Dict], candidates: List[Union[Dict, str]], chosen_response: Union[Dict, str]) -> float:
-        history_str = self.format_conversation_history(conversation_history)
-        user_query = conversation_history[-1]['content']
-        
-        gen_prompt = f"<conversation history>\n{history_str}\n</conversation history>\n\n<user preference profile>\n{user_profile}\n</user preference profile>\n\nBased on the user's preferences, generate an appropriate response to their last message."
-        
-        generated_response = self.tracer_model.interact(gen_prompt, temperature=0.7, max_tokens=256)
-        
+    def evaluate_generation(self, user_profile: str, context_history: List[Dict], user_query: str, chosen_response: Union[Dict, str]) -> float:
+        """Generate for the current user query (cold start allowed) and score against the chosen response."""
+        history_str = self.format_conversation_history(context_history)
+        gen_prompt = (
+            f"<conversation history>\n{history_str}\n</conversation history>\n\n"
+            f"<user preference profile>\n{user_profile}\n</user preference profile>\n\n"
+            f"User's message: {user_query}\n"
+            f"Based on the user's preferences, generate an appropriate response to this message."
+        )
+
+        generated_response = self.tracer_model.interact(gen_prompt, temperature=0.3, max_tokens=256)
+
         chosen_content = chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', '')
-        eval_prompt = f"<generated response>\n{generated_response}\n</generated response>\n\n<actual chosen response>\n{chosen_content}\n</actual chosen response>\n\nRate how similar these responses are in style, content, and alignment with user preferences on a scale of 1-10. Output only the number without any explanation.\n\nRating:"
-        
+        eval_prompt = (
+            f"<generated response>\n{generated_response}\n</generated response>\n\n"
+            f"<actual chosen response>\n{chosen_content}\n</actual chosen response>\n\n"
+            "Rate how similar these responses are in style, content, and alignment with user preferences on a scale of 1-10. "
+            "Output only the number without any explanation.\n\nRating:"
+        )
+
         rating_response = self.eval_model.interact(eval_prompt, temperature=0, max_tokens=10)
-        
+
         match = re.search(r'\d+\.?\d*', rating_response.strip())
         rating = float(match.group(0)) if match else 5.0
         rating = max(1.0, min(10.0, rating))
-        
+
         return rating / 10.0
 
-    def predict_choice(self, user_profile: str, conversation_history: List[Dict], candidates: List[Union[Dict, str]]) -> int:
-        history_str = self.format_conversation_history(conversation_history)
-        candidates_str = self.format_candidates(candidates, numbered=True)
-        
-        prompt = f"<conversation history>\n{history_str}\n</conversation history>\n\n<response candidates>\n{candidates_str}\n</response candidates>\n\n<user preference profile>\n{user_profile}\n</user preference profile>\n\nBased on the user's preferences, which response would they most likely choose? Answer with just the number (1-{len(candidates)}).\n\nAnswer:"
-        
-        prediction = self.tracer_model.interact(prompt, temperature=0, max_tokens=10)
-        
-        match = re.search(r'\d+', prediction.strip())
-        predicted_idx = int(match.group(0)) - 1 if match else 0
-        predicted_idx = max(0, min(len(candidates) - 1, predicted_idx))
-        
-        return predicted_idx
+    def predict_choice(self, user_profile: str, conversation_history: List[Dict], candidates: List[Union[Dict, str]], actual_idx: int) -> Dict:
+        """
+        Rank all candidates in a single call and compute a ranking loss.
+        We ask the model to order candidates from most to least likely choice
+        given the user profile and current message. Loss = cross entropy on
+        softmax(-rank_position) with the ground-truth top choice.
+        """
+        user_query = ""
+        for msg in reversed(conversation_history):
+            if msg.get('role') == 'user':
+                user_query = msg.get('content', '')
+                break
+
+        candidate_texts = [c if isinstance(c, str) else c.get('content', '') for c in candidates]
+        candidate_block = "\n".join([f"{i+1}. {text}" for i, text in enumerate(candidate_texts)])
+
+        system_prompt = (
+            "You are ranking candidate responses for a user. "
+            "Rank all candidates from most to least likely based on the user's preferences. "
+            "Use the final line exactly as: 'Ranking: i > j > k ...' with candidate numbers. "
+            "Include each candidate exactly once."
+        )
+
+        prompt = (
+            f"<user message>\n{user_query}\n</user message>\n\n"
+            f"<user preference profile>\n{user_profile}\n</user preference profile>\n\n"
+            f"<candidate responses>\n{candidate_block}\n</candidate responses>\n\n"
+            "Provide brief reasoning (<=3 sentences) and then the final ranking line."
+        )
+
+        ranking_response = self.tracer_model.interact(
+            prompt, temperature=0, system_prompt=system_prompt, max_tokens=256
+        )
+
+        ranking_order = self.extract_ranking_order(ranking_response, len(candidates))
+        # Map ranking order to positions (0 = best)
+        default_pos = len(candidates) - 1
+        rank_positions = [default_pos for _ in candidates]
+        for pos, idx in enumerate(ranking_order):
+            if 1 <= idx <= len(candidates):
+                rank_positions[idx - 1] = pos
+
+        rank_positions = np.array(rank_positions)
+        probs = softmax(-rank_positions)
+        predicted_idx = int(np.argmax(probs)) if len(probs) > 0 else 0
+
+        eps = 1e-12
+        true_prob = probs[actual_idx] if 0 <= actual_idx < len(probs) else eps
+        ranking_loss = -np.log(true_prob + eps)
+
+        return {
+            'predicted_idx': predicted_idx,
+            'soft_loss': float(ranking_loss),
+            'probs': probs.tolist(),
+            'rank_positions': rank_positions.tolist(),
+            'ranking_order': ranking_order,
+            'ranking_response': ranking_response,
+            'prompt': prompt
+        }
+
+    def extract_ranking_order(self, response: str, n_candidates: int) -> List[int]:
+        """Extract an ordered list of candidate indices (1-based) from a ranking response."""
+        ranking_sections = re.findall(r'(?i)ranking[:\s]*([^\n]+)', response)
+        search_space = ranking_sections[-1] if ranking_sections else response
+        nums = re.findall(r'\d+', search_space)
+        order = []
+        seen = set()
+        for num in nums:
+            idx = int(num)
+            if 1 <= idx <= n_candidates and idx not in seen:
+                order.append(idx)
+                seen.add(idx)
+        # Append any missing candidates to ensure full ordering
+        for idx in range(1, n_candidates + 1):
+            if idx not in seen:
+                order.append(idx)
+        return order
 
     def format_conversation_history(self, history: List[Dict]) -> str:
         formatted = []
@@ -308,6 +407,7 @@ class PreferenceTracer:
         hypotheses = None
         turn_results = []
         hypotheses_list = []
+        last_user_profile = ""
         
         should_print = self.args.print if hasattr(self.args, 'print') else False
         
@@ -326,11 +426,11 @@ class PreferenceTracer:
         global_turn_idx = 0
         for conv_idx, conv in enumerate(conversations):
             conv_turns = conv['turns']
-            # New conversation boundary: reset contexts/perceptions but keep beliefs
+            # New conversation boundary: reset contexts/perceptions but keep beliefs; keep profile across conversations
             if hypotheses is not None:
                 hypotheses = self.reset_hypotheses_for_new_conversation(hypotheses)
                 if self.data_manager:
-                    self.data_manager.log(f"\n=== New conversation: {conv.get('conversation_id', conv_idx)} (contexts reset) ===")
+                    self.data_manager.log(f"\n=== New conversation: {conv.get('conversation_id', conv_idx)} (contexts reset, profile retained) ===")
             for t_idx_within, turn_data in enumerate(conv_turns):
                 user_msg = turn_data['user_message']
                 candidates = turn_data['candidates']
@@ -354,17 +454,23 @@ class PreferenceTracer:
                     self.data_manager.log(f"User Message: {user_msg_text[:100]}...")
                     self.data_manager.log(f"Chosen Response: {chosen_text[:100]}...")
             
-                # Build history restricted to current conversation up to this turn
-                history = self.build_history(conv_turns[:t_idx_within + 1])
+                # Build history from previous turns only (exclude current), keep last 3 turns for context
+                prev_turns = conv_turns[:t_idx_within]
+                recent_prev_turns = prev_turns[-3:]
+                history_prev = self.build_history(recent_prev_turns)
+
+                # Online generation evaluation BEFORE updating hypotheses/profile
+                profile_before_update = last_user_profile
+                gen_score = self.evaluate_generation(profile_before_update, history_prev, user_msg_text, chosen_response)
             
                 # Initialize or propagate hypotheses
                 if hypotheses is None:
-                    hypotheses = self.initialize_hypotheses(user_id, history, candidates)
+                    hypotheses = self.initialize_hypotheses(user_id, history_prev, candidates, chosen_response)
                 else:
-                    hypotheses = self.propagate_hypotheses(hypotheses, history, candidates)
+                    hypotheses = self.propagate_hypotheses(hypotheses, history_prev, candidates, chosen_response, user_msg_text)
             
                 # Weigh hypotheses based on user's choice
-                weight_results = self.weigh_hypotheses(hypotheses, chosen_response, candidates)
+                weight_results = self.weigh_hypotheses(hypotheses, chosen_response, candidates, user_msg_text)
                 hypotheses.update_weights(weight_results['weights'])
                 hypotheses.weight_details = weight_results
                 
@@ -399,14 +505,10 @@ class PreferenceTracer:
                 
                 hypotheses_list.append(hypotheses)
                 
-                # Summarize current user profile
+                # Summarize current user profile (after update) and carry forward
                 user_profile = self.summarize_hypotheses(hypotheses)
+                last_user_profile = user_profile
                 
-                # Evaluate generation quality
-                gen_score = self.evaluate_generation(user_profile, history, candidates, chosen_response)
-                
-                # Predict user choice
-                predicted_idx = self.predict_choice(user_profile, history, candidates)
                 # Determine actual index depending on data shape
                 if candidates and isinstance(candidates[0], dict):
                     actual_idx = next((i for i, c in enumerate(candidates) if c.get('if_chosen', False)), 0)
@@ -416,11 +518,18 @@ class PreferenceTracer:
                         actual_idx = candidates.index(chosen_text)
                     except ValueError:
                         actual_idx = 0
+
+                # Predict user choice with soft evaluation
+                history_with_current = self.build_history((recent_prev_turns + [turn_data])[-3:])
+                pred_result = self.predict_choice(user_profile, history_with_current, candidates, actual_idx)
+                predicted_idx = pred_result['predicted_idx']
+                soft_loss = pred_result['soft_loss']
                 prediction_correct = (predicted_idx == actual_idx)
 
                 if should_print:
                     console.print(f"\n[bold]Turn {global_turn_idx} Results:[/bold]")
                     console.print(f"  Gen Score: [cyan]{gen_score:.3f}[/cyan]")
+                    console.print(f"  Soft CE Loss: [cyan]{soft_loss:.3f}[/cyan]")
                     console.print(f"  Prediction: [{'green' if prediction_correct else 'red'}]{'✓' if prediction_correct else '✗'}[/{'green' if prediction_correct else 'red'}] (predicted: {predicted_idx}, actual: {actual_idx})")
                     if self.args.n_hypotheses > 1 and ess is not None:
                         console.print(f"  ESS: [yellow]{ess:.2f}[/yellow]")
@@ -431,6 +540,7 @@ class PreferenceTracer:
                     'prediction_correct': prediction_correct,
                     'predicted_idx': predicted_idx,
                     'actual_idx': actual_idx,
+                    'soft_loss': soft_loss,
                     'ess': ess if ess is not None else float('nan'),
                     'text_diversity': overall_text_diversity if overall_text_diversity is not None else float('nan'),
                     'resampled': resampled,
@@ -450,6 +560,7 @@ class PreferenceTracer:
                     'prediction_correct': prediction_correct,
                     'predicted_idx': predicted_idx,
                     'actual_idx': actual_idx,
+                    'soft_loss': soft_loss,
                     'hypotheses': hypotheses.texts,
                     'weights': hypotheses.weights.tolist(),
                     'ess': ess if ess is not None else None,
@@ -635,8 +746,10 @@ def run_preference_tracing(args):
 def analyze_results(results: List[Dict], args):
     turn_gen_scores = {}
     turn_pred_accuracy = {}
+    turn_soft_loss = {}
     
     for user_result in results:
+        gen_eval_idx = 0  # reindex per-user valid generation evaluations
         for turn_result in user_result['turn_results']:
             turn = turn_result['turn']
             
@@ -644,13 +757,35 @@ def analyze_results(results: List[Dict], args):
                 turn_gen_scores[turn] = []
             if turn not in turn_pred_accuracy:
                 turn_pred_accuracy[turn] = []
+            if turn not in turn_soft_loss:
+                turn_soft_loss[turn] = []
             
-            turn_gen_scores[turn].append(turn_result['gen_score'])
-            turn_pred_accuracy[turn].append(1.0 if turn_result['prediction_correct'] else 0.0)
+            gs = turn_result.get('gen_score', float('nan'))
+            if np.isfinite(gs):
+                if gen_eval_idx not in turn_gen_scores:
+                    turn_gen_scores[gen_eval_idx] = []
+                turn_gen_scores[gen_eval_idx].append(gs)
+                gen_eval_idx += 1
+            acc_val = 1.0 if turn_result.get('prediction_correct') else 0.0
+            turn_pred_accuracy[turn].append(acc_val)
+            sl = turn_result.get('soft_loss', float('nan'))
+            if np.isfinite(sl):
+                turn_soft_loss[turn].append(sl)
+
+    def _stats(values):
+        if not values:
+            return {'mean': float('nan'), 'std': float('nan'), 'ci': float('nan')}
+        arr = np.array(values)
+        return {
+            'mean': float(np.mean(arr)),
+            'std': float(np.std(arr)),
+            'ci': float(1.96 * np.std(arr) / np.sqrt(len(arr)))
+        }
     
     summary = {
-        'turn_gen_scores': {t: {'mean': np.mean(scores), 'std': np.std(scores), 'ci': 1.96 * np.std(scores) / np.sqrt(len(scores))} for t, scores in turn_gen_scores.items()},
-        'turn_pred_accuracy': {t: {'mean': np.mean(acc), 'std': np.std(acc), 'ci': 1.96 * np.std(acc) / np.sqrt(len(acc))} for t, acc in turn_pred_accuracy.items()}
+        'turn_gen_scores': {t: _stats(scores) for t, scores in turn_gen_scores.items()},
+        'turn_pred_accuracy': {t: _stats(acc) for t, acc in turn_pred_accuracy.items()},
+        'turn_soft_loss': {t: _stats(losses) for t, losses in turn_soft_loss.items()}
     }
     
     run_dir = os.path.join(args.output_dir, args.run_id)
@@ -666,6 +801,11 @@ def analyze_results(results: List[Dict], args):
     print("\n=== Prediction Accuracy by Turn ===")
     for turn in sorted(turn_pred_accuracy.keys()):
         stats = summary['turn_pred_accuracy'][turn]
+        print(f"Turn {turn}: {stats['mean']:.3f} ± {stats['ci']:.3f}")
+
+    print("\n=== Soft CE Loss by Turn ===")
+    for turn in sorted(turn_soft_loss.keys()):
+        stats = summary['turn_soft_loss'][turn]
         print(f"Turn {turn}: {stats['mean']:.3f} ± {stats['ci']:.3f}")
 
 if __name__ == "__main__":

@@ -11,37 +11,72 @@ def plot_learning_curves(summary_file: str, output_dir: str):
     with open(summary_file, 'r') as f:
         summary = json.load(f)
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     
-    turns = sorted([int(t) for t in summary['turn_gen_scores'].keys()])
-    gen_means = [summary['turn_gen_scores'][str(t)]['mean'] for t in turns]
-    gen_cis = [summary['turn_gen_scores'][str(t)]['ci'] for t in turns]
-    
-    ax1.plot(turns, gen_means, marker='o', linewidth=2, markersize=8, label='Generation Score')
-    ax1.fill_between(turns, 
-                     np.array(gen_means) - np.array(gen_cis),
-                     np.array(gen_means) + np.array(gen_cis),
-                     alpha=0.3)
+    def _extract_curve(stats_dict):
+        turns = sorted([int(t) for t in stats_dict.keys()])
+        means = []
+        cis = []
+        for t in turns:
+            entry = stats_dict.get(str(t), {}) if isinstance(list(stats_dict.keys())[0], str) else stats_dict.get(t, {})
+            means.append(entry.get('mean', np.nan))
+            cis.append(entry.get('ci', np.nan))
+        # Filter nan
+        turns_clean = []
+        means_clean = []
+        cis_clean = []
+        for t, m, c in zip(turns, means, cis):
+            if np.isfinite(m):
+                turns_clean.append(t)
+                means_clean.append(m)
+                cis_clean.append(c if np.isfinite(c) else 0.0)
+        return turns_clean, means_clean, cis_clean
+
+    # Generation quality
+    gen_turns, gen_means, gen_cis = _extract_curve(summary['turn_gen_scores'])
+    ax1 = axes[0]
+    ax1.plot(gen_turns, gen_means, marker='o', linewidth=2, markersize=8, label='Generation Score')
+    if gen_turns:
+        ax1.fill_between(gen_turns,
+                         np.array(gen_means) - np.array(gen_cis),
+                         np.array(gen_means) + np.array(gen_cis),
+                         alpha=0.3)
     ax1.set_xlabel('Turn', fontsize=12)
     ax1.set_ylabel('Generation Quality Score', fontsize=12)
     ax1.set_title('Generation Quality Over Turns', fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3)
     ax1.legend()
     
-    pred_means = [summary['turn_pred_accuracy'][str(t)]['mean'] for t in turns]
-    pred_cis = [summary['turn_pred_accuracy'][str(t)]['ci'] for t in turns]
-    
-    ax2.plot(turns, pred_means, marker='s', linewidth=2, markersize=8, color='coral', label='Prediction Accuracy')
-    ax2.fill_between(turns,
-                     np.array(pred_means) - np.array(pred_cis),
-                     np.array(pred_means) + np.array(pred_cis),
-                     alpha=0.3, color='coral')
+    # Prediction accuracy
+    pred_turns, pred_means, pred_cis = _extract_curve(summary['turn_pred_accuracy'])
+    ax2 = axes[1]
+    ax2.plot(pred_turns, pred_means, marker='s', linewidth=2, markersize=8, color='coral', label='Prediction Accuracy')
+    if pred_turns:
+        ax2.fill_between(pred_turns,
+                         np.array(pred_means) - np.array(pred_cis),
+                         np.array(pred_means) + np.array(pred_cis),
+                         alpha=0.3, color='coral')
     ax2.set_xlabel('Turn', fontsize=12)
     ax2.set_ylabel('Prediction Accuracy', fontsize=12)
     ax2.set_title('Choice Prediction Accuracy Over Turns', fontsize=14, fontweight='bold')
     ax2.set_ylim([0, 1])
     ax2.grid(True, alpha=0.3)
     ax2.legend()
+    
+    # Soft loss
+    soft_turns, soft_means, soft_cis = _extract_curve(summary.get('turn_soft_loss', {}))
+    ax3 = axes[2]
+    ax3.plot(soft_turns, soft_means, marker='^', linewidth=2, markersize=8, color='slateblue', label='Soft CE Loss')
+    if soft_turns:
+        ax3.fill_between(soft_turns,
+                         np.array(soft_means) - np.array(soft_cis),
+                         np.array(soft_means) + np.array(soft_cis),
+                         alpha=0.3, color='slateblue')
+    ax3.set_xlabel('Turn', fontsize=12)
+    ax3.set_ylabel('Soft Cross-Entropy Loss', fontsize=12)
+    ax3.set_title('Soft Loss Over Turns', fontsize=14, fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    ax3.legend()
     
     plt.tight_layout()
     plt.savefig(f'{output_dir}/learning_curves.png', dpi=300, bbox_inches='tight')
