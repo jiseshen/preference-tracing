@@ -87,7 +87,7 @@ def plot_survey_alignment(survey_eval_file: str, output_dir: str):
     with open(survey_eval_file, 'r') as f:
         survey_results = json.load(f)
     
-    if not survey_results['summary_statistics']:
+    if 'summary_statistics' not in survey_results or not survey_results['summary_statistics']:
         print("No survey evaluation data available")
         return
     

@@ -520,8 +520,8 @@ class PreferenceTracer:
                         actual_idx = 0
 
                 # Predict user choice with soft evaluation
-                history_with_current = self.build_history((recent_prev_turns + [turn_data])[-3:])
-                pred_result = self.predict_choice(user_profile, history_with_current, candidates, actual_idx)
+                history_for_prediction = history_prev + [{'role': 'user', 'content': user_msg_text}]
+                pred_result = self.predict_choice(profile_before_update, history_for_prediction, candidates, actual_idx)
                 predicted_idx = pred_result['predicted_idx']
                 soft_loss = pred_result['soft_loss']
                 prediction_correct = (predicted_idx == actual_idx)
