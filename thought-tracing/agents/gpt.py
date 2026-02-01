@@ -176,6 +176,19 @@ class AsyncConversationalGPTBaseAgent(ConversationalGPTBaseAgent, AsyncBaseAgent
         super().__init__(kwargs)
         self._set_default_args()
         self.client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        self._loop = None
+
+    def _get_event_loop(self):
+        if self._loop is None or self._loop.is_closed():
+            try:
+                self._loop = asyncio.get_event_loop()
+                if self._loop.is_closed():
+                    self._loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(self._loop)
+            except RuntimeError:
+                self._loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self._loop)
+        return self._loop
 
     def preprocess_input(self, text, system_prompt=None, history=None):
         messages = []
@@ -211,12 +224,34 @@ class AsyncConversationalGPTBaseAgent(ConversationalGPTBaseAgent, AsyncBaseAgent
             message_batch = [self.preprocess_input(prompt, system_prompt, history) for prompt, system_prompt, history in zip(prompts, system_prompts, histories)]
         else:
             message_batch = [self.preprocess_input(prompt, system_prompt) for prompt, system_prompt in zip(prompts, system_prompts)]
+
+        retry_count = 0
+        max_retries = 5
         while True:
             try:
-                outputs = asyncio.run(self.batch_generate(message_batch, temperature=temperature, max_tokens=max_tokens))
+                loop = self._get_event_loop()
+                outputs = loop.run_until_complete(self.batch_generate(message_batch, temperature=temperature, max_tokens=max_tokens))
             except Exception as e:
-                print("Error: {}".format(e))
-                time.sleep(0.1)
+                import traceback
+                retry_count += 1
+                print(f"\n{'='*60}")
+                print(f"ERROR in batch_interact (attempt {retry_count}/{max_retries})")
+                print(f"Model: {self.args.model}")
+                print(f"Batch size: {len(prompts)}")
+                print(f"Temperature: {temperature}, Max tokens: {max_tokens}")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Error message: {str(e)}")
+                print(f"{'='*60}")
+                traceback.print_exc()
+                print(f"{'='*60}\n")
+
+                if retry_count >= max_retries:
+                    print(f"FATAL: Max retries ({max_retries}) reached. Raising exception.")
+                    raise
+
+                wait_time = min(0.1 * (2 ** retry_count), 5)
+                print(f"Retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
                 continue
             break
         responses = [self.postprocess_output(output) for output in outputs]
@@ -292,12 +327,34 @@ class O1BaseAgent(AsyncConversationalGPTBaseAgent):
             message_batch = [self.preprocess_input(prompt, system_prompt, history) for prompt, system_prompt, history in zip(prompts, system_prompts, histories)]
         else:
             message_batch = [self.preprocess_input(prompt, system_prompt) for prompt, system_prompt in zip(prompts, system_prompts)]
+
+        retry_count = 0
+        max_retries = 5
         while True:
             try:
-                outputs = asyncio.run(self.batch_generate(message_batch, temperature=temperature, max_tokens=max_tokens))
+                loop = self._get_event_loop()
+                outputs = loop.run_until_complete(self.batch_generate(message_batch, temperature=temperature, max_tokens=max_tokens))
             except Exception as e:
-                print("Error: {}".format(e))
-                time.sleep(0.1)
+                import traceback
+                retry_count += 1
+                print(f"\n{'='*60}")
+                print(f"ERROR in batch_interact (attempt {retry_count}/{max_retries})")
+                print(f"Model: {self.args.model}")
+                print(f"Batch size: {len(prompts)}")
+                print(f"Temperature: {temperature}, Max tokens: {max_tokens}")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Error message: {str(e)}")
+                print(f"{'='*60}")
+                traceback.print_exc()
+                print(f"{'='*60}\n")
+
+                if retry_count >= max_retries:
+                    print(f"FATAL: Max retries ({max_retries}) reached. Raising exception.")
+                    raise
+
+                wait_time = min(0.1 * (2 ** retry_count), 5)
+                print(f"Retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
                 continue
             break
         responses = [self.postprocess_output(output) for output in outputs]

@@ -160,7 +160,7 @@ def run_survey_evaluation(args):
     
     evaluation_results = evaluator.evaluate_all_profiles(tracing_results, survey_data)
     
-    output_file = os.path.join(args.output_dir, f"survey_evaluation_{args.run_id}.json")
+    output_file = os.path.join(args.output_dir, f"survey_evaluation.json")
     with open(output_file, 'w') as f:
         json.dump(evaluation_results, f, indent=2)
     

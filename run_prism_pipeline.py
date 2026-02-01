@@ -3,6 +3,7 @@ import os
 import sys
 import argparse
 import shutil
+import dotenv
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "thought-tracing"))
 
@@ -29,7 +30,8 @@ def main():
     parser.add_argument('--print', action='store_true', help='Enable verbose console logging during tracing')
     
     args = parser.parse_args()
-    
+    dotenv.load_dotenv(override=True)
+    print(f"Using OpenAI API Key: ...{os.getenv('OPENAI_API_KEY')[-4:]}")
     os.makedirs(args.output_dir, exist_ok=True)
     run_dir = os.path.join(args.output_dir, args.run_id)
     results_file = os.path.join(run_dir, "results.json")

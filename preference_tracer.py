@@ -56,45 +56,60 @@ class PreferenceTracer:
         )
         return reset
 
+    def compare_candidates(self, candidates: List[Union[Dict, str]], chosen_response: Union[Dict, str]) -> str:
+        chosen_text = chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', '')
+        candidates_str = self.format_candidates(candidates, include_chosen=True, chosen_text=chosen_text)
+
+        prompt = (
+            f"<response candidates>\n{candidates_str}\n</response candidates>\n\n"
+            f"Compare the [CHOSEN] response with other candidates. Write a concise summary (2-3 sentences) of the core differences regarding: "
+            f"writing style, tone, verbosity, safety considerations, value provided. Focus on what makes the chosen response distinctive."
+        )
+
+        comparison = self.tracer_model.interact(prompt, temperature=0, max_tokens=128)
+        return comparison.strip()
+
     def initialize_hypotheses(self, user_id: str, conversation_history: List[Dict], candidates: List[Union[Dict, str]], chosen_response: Union[Dict, str]) -> HypothesesSetV3:
         history_str = self.format_conversation_history(conversation_history)
         candidates_str = self.format_candidates(candidates, include_chosen=True, chosen_text=chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', ''))
         chosen_text = chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', '')
-        
+
+        comparison_summary = self.compare_candidates(candidates, chosen_response)
+
         context_input = (
             f"<conversation history>\n{history_str}\n</conversation history>\n\n"
             f"<response candidates>\n{candidates_str}\n</response candidates>\n\n"
-            f"<user chosen response>\n{chosen_text}\n</user chosen response>"
+            f"<comparison summary>\n{comparison_summary}\n</comparison summary>"
         )
-        
+
         prompt = (
             f"{context_input}\n\n"
-            f"Compare the chosen response against the other candidates to infer what the user prefers. "
-            f"Generate a numbered list of {self.args.n_hypotheses} hypotheses about the user's preferences, values, and communication style that best explain why they chose this response over the alternatives. "
-            f"Be specific about comparative signals (tone, detail level, safety, helpfulness, directness)."
+            f"Infer what the user prefers based on their choice. "
+            f"Generate a numbered list of {self.args.n_hypotheses} concise hypotheses about the user's core preferences. "
+            f"Focus on essential preferences (tone, directness, depth, safety stance, value priorities) rather than restating conversation topics."
         )
-        
+
         should_print = self.args.print if hasattr(self.args, 'print') else False
-        
+
         if should_print:
             console.print(Panel(f"[bold cyan]Initializing hypotheses for user {user_id}[/bold cyan]", style="cyan"))
-        
+
         if self.data_manager:
             self.data_manager.log(f"=== Initializing Hypotheses for User {user_id} ===")
-        
+
         hypotheses_list = prompting_for_ordered_list(self.tracer_model, prompt=prompt, n=self.args.n_hypotheses)
         hypotheses_list = [h.strip() for h in hypotheses_list]
-        
+
         weights = np.ones(len(hypotheses_list)) / len(hypotheses_list)
-        
+
         if should_print:
-            console.print(Panel("\n".join([f"{i+1}. {h}" for i, h in enumerate(hypotheses_list)]), 
+            console.print(Panel("\n".join([f"{i+1}. {h}" for i, h in enumerate(hypotheses_list)]),
                        title="Initial Hypotheses", style="green"))
-        
+
         if self.data_manager:
             for i, h in enumerate(hypotheses_list):
                 self.data_manager.log(f"  {i+1}. {h}")
-        
+
         return HypothesesSetV3(
             target_agent=user_id,
             contexts=[{'candidates': candidates}],
@@ -106,80 +121,111 @@ class PreferenceTracer:
     def propagate_hypotheses(self, existing_hypotheses: HypothesesSetV3, conversation_history: List[Dict], candidates: List[Union[Dict, str]], chosen_response: Union[Dict, str], user_query: str) -> HypothesesSetV3:
         history_str = self.format_conversation_history(conversation_history)
         candidates_str = self.format_candidates(candidates, include_chosen=True, chosen_text=chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', ''))
-        chosen_text = chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', '')
-        
+
+        comparison_summary = self.compare_candidates(candidates, chosen_response)
+
         new_context = (
             f"<conversation history>\n{history_str}\n</conversation history>\n\n"
             f"<user message>\n{user_query}\n</user message>\n\n"
             f"<current responses>\n{candidates_str}\n</current responses>\n\n"
-            f"<user chosen response>\n{chosen_text}\n</user chosen response>"
+            f"<comparison summary>\n{comparison_summary}\n</comparison summary>"
         )
-        
+
         if self.args.print if hasattr(self.args, 'print') else False:
             print(Panel("[bold yellow]Propagating hypotheses...[/bold yellow]", style="yellow"))
-        
+
         propagation_prompts = [
             f"<previous preference>\n{hypothesis}\n</previous preference>\n\n<new context>\n{new_context}\n</new context>\n\n"
-            f"Compare the chosen response against the other candidates and reason about the user's choice. "
-            f"Update the hypothesis to make it consistent to the new context. Keep the conciseness and main idea of the previous hypothesis. "
-            f"Only output the updated hypothesis without any additional explanation."
+            f"Assess if the previous preference is too trivial or lacks information to capture the new user choice dynamics. "
+            f"If expansion is needed to better explain the user's preference, output multiple refined hypotheses (2-3) exploring different aspects. "
+            f"If the hypothesis is sufficient, output the updated hypothesis only. "
+            f"Respond in JSON format: {{\"need_expand\": true/false, \"hypotheses\": [\"hypothesis1\", \"hypothesis2\", ...]}}. "
+            f"Keep hypotheses concise and focused on core preferences."
             for hypothesis in existing_hypotheses.texts
         ]
-        
-        propagated_texts = self.tracer_model.batch_interact(propagation_prompts, temperature=0.3, max_tokens=128)
-        
+
+        propagated_responses = self.tracer_model.batch_interact(propagation_prompts, temperature=0.3, max_tokens=256)
+
+        all_new_hypotheses = []
+        all_new_weights = []
+        for idx, response in enumerate(propagated_responses):
+            try:
+                json_match = re.search(r'\{[^{}]*"need_expand"[^{}]*\}', response, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group(0))
+                else:
+                    parsed = json.loads(response)
+                need_expand = parsed.get("need_expand", False)
+                hypotheses_from_this = parsed.get("hypotheses", [])
+            except (json.JSONDecodeError, AttributeError):
+                need_expand = False
+                hypotheses_from_this = [response.strip()]
+
+            if not hypotheses_from_this:
+                hypotheses_from_this = [existing_hypotheses.texts[idx]]
+
+            n_expanded = len(hypotheses_from_this)
+            weight_per_hypothesis = existing_hypotheses.weights[idx] / n_expanded
+
+            all_new_hypotheses.extend(hypotheses_from_this)
+            all_new_weights.extend([weight_per_hypothesis] * n_expanded)
+
+        all_new_weights = np.array(all_new_weights)
+        all_new_weights = all_new_weights / all_new_weights.sum()
+
         new_contexts = existing_hypotheses.contexts + [{'candidates': candidates}]
         new_perceptions = existing_hypotheses.perceptions + [{'perception': f'turn_{len(existing_hypotheses.contexts)}', 'input_candidates': candidates_str}]
-        
+
         return HypothesesSetV3(
             target_agent=existing_hypotheses.target_agent,
             contexts=new_contexts,
             perceptions=new_perceptions,
-            texts=propagated_texts,
-            weights=existing_hypotheses.weights,
+            texts=all_new_hypotheses,
+            weights=all_new_weights,
             parent_hypotheses=existing_hypotheses.hypotheses,
             propagation_prompts=propagation_prompts,
-            propagated_outputs=propagated_texts
+            propagated_outputs=propagated_responses
         )
 
     def weigh_hypotheses(self, hypotheses: HypothesesSetV3, chosen_response: Union[Dict, str], candidates: List[Union[Dict, str]], user_query: str) -> Dict:
         chosen_content = chosen_response if isinstance(chosen_response, str) else chosen_response.get('content', '')
         candidates_str = self.format_candidates(candidates, include_chosen=True, chosen_text=chosen_content)
-        
+
+        comparison_summary = self.compare_candidates(candidates, chosen_response)
+
         if self.args.print if hasattr(self.args, 'print') else False:
             print(Panel("[bold magenta]Weighing hypotheses based on user choice...[/bold magenta]", style="magenta"))
-        
+
         word_mapping = {
-            'a': "Very Likely (90%)", 
-            'b': "Likely (70%)", 
-            'c': "Somewhat Likely (50%)", 
-            'd': "Somewhat Unlikely (30%)", 
-            'e': "Unlikely (10%)", 
+            'a': "Very Likely (90%)",
+            'b': "Likely (70%)",
+            'c': "Somewhat Likely (50%)",
+            'd': "Somewhat Unlikely (30%)",
+            'e': "Unlikely (10%)",
             'f': "Very Unlikely (<5%)"
         }
         score_mapping = {'a': 3, 'b': 2.5, 'c': 2, 'd': 1, 'e': 0.5, 'f': 0.001}
         options_str = "\n".join([f"({k}) {v}" for k, v in word_mapping.items()])
-        
+
         system_prompt = (
             "You evaluate how likely a user would choose a specific response given their preference. "
             f"Use the provided options exactly: {options_str}. "
-            "Briefly compare the chosen response to the other candidates from the perspective of this hypothesis and reason how likely the user would choose it."
-            "Then output a single final line exactly: 'Answer: <the answer letter>'. Only one final Answer line; do not include any other 'Answer:' occurrences."
+            "A comparison summary is provided. Assess the likelihood directly and output: 'Answer: <the answer letter>'."
         )
-        
+
         likelihood_prompts = []
         for hypothesis in hypotheses.texts:
             prompt = (
                 f"<user message>\n{user_query}\n</user message>\n\n"
                 f"<preference>\n{hypothesis}\n</preference>\n\n"
                 f"<available responses>\n{candidates_str}\n</available responses>\n\n"
-                f"<chosen response>\n{chosen_content}\n</chosen response>\n\n"
-                f"How likely would it be that the user choose this response given their preference as described?"
+                f"<comparison summary>\n{comparison_summary}\n</comparison summary>\n\n"
+                f"How likely would the user choose the [CHOSEN] response given their preference?"
             )
             likelihood_prompts.append(prompt)
         
-        raw_predictions = self.tracer_model.batch_interact(likelihood_prompts, temperature=0, system_prompts=system_prompt, max_tokens=128)
-        
+        raw_predictions = self.tracer_model.batch_interact(likelihood_prompts, temperature=0, system_prompts=system_prompt, max_tokens=32)
+
         reasonings = []
         answers = []
         for response in raw_predictions:
@@ -192,26 +238,51 @@ class PreferenceTracer:
             answers.append(option_letter)
         
         raw_scores = np.array([self.map_response_to_score(a, score_mapping) for a in answers])
-        # Cumulative update: combine previous weights as prior with new likelihood scores
         prior = hypotheses.weights
         eps = 1e-12
         log_prior = np.log(prior + eps)
-        combined = log_prior + raw_scores  # log posterior up to additive constant
+        combined = log_prior + raw_scores
         weights = softmax(combined)
-        
-        if self.args.print if hasattr(self.args, 'print') else False:
-            print("\n[bold]Hypothesis Weights:[/bold]")
-            for i, (h, w, score) in enumerate(zip(hypotheses.texts, weights, raw_scores)):
-                print(Panel(f"[cyan]{h}[/cyan]\n\n[bold yellow]Raw Score: {score:.3f} | Weight: {w:.3f}[/bold yellow]", 
-                           title=f"Hypothesis {i+1}", style="blue"))
-        
-        return {
+
+        result = {
+            'weights': weights,
             'prompts': likelihood_prompts,
             'raw_predictions': raw_predictions,
             'reasonings': reasonings,
-            'raw_scores': raw_scores,
-            'weights': weights
+            'raw_scores': raw_scores
         }
+
+        if len(hypotheses.texts) > self.args.n_hypotheses:
+            combined_scores = prior * np.exp(raw_scores)
+            top_indices = np.argsort(combined_scores)[-self.args.n_hypotheses:][::-1]
+            final_texts = [hypotheses.texts[i] for i in top_indices]
+            final_weights = weights[top_indices]
+            final_weights = final_weights / final_weights.sum()
+            final_raw_scores = raw_scores[top_indices]
+            final_reasonings = [reasonings[i] for i in top_indices]
+            final_prompts = [likelihood_prompts[i] for i in top_indices]
+            final_predictions = [raw_predictions[i] for i in top_indices]
+
+            result = {
+                'texts': final_texts,
+                'weights': final_weights,
+                'prompts': final_prompts,
+                'raw_predictions': final_predictions,
+                'reasonings': final_reasonings,
+                'raw_scores': final_raw_scores
+            }
+
+        display_texts = result.get('texts', hypotheses.texts)
+        display_weights = result['weights']
+        display_scores = result['raw_scores']
+
+        if self.args.print if hasattr(self.args, 'print') else False:
+            print("\n[bold]Hypothesis Weights:[/bold]")
+            for i, (h, w, score) in enumerate(zip(display_texts, display_weights, display_scores)):
+                print(Panel(f"[cyan]{h}[/cyan]\n\n[bold yellow]Raw Score: {score:.3f} | Weight: {w:.3f}[/bold yellow]",
+                           title=f"Hypothesis {i+1}", style="blue"))
+
+        return result
 
     def extract_option_letter(self, response: str, default: str = 'c') -> str:
         """Extract an option letter (a-f) from a model response, accepting parentheses or plain letters."""
@@ -471,6 +542,8 @@ class PreferenceTracer:
             
                 # Weigh hypotheses based on user's choice
                 weight_results = self.weigh_hypotheses(hypotheses, chosen_response, candidates, user_msg_text)
+                if 'texts' in weight_results:
+                    hypotheses.update_texts(weight_results['texts'])
                 hypotheses.update_weights(weight_results['weights'])
                 hypotheses.weight_details = weight_results
                 
@@ -546,7 +619,7 @@ class PreferenceTracer:
                     'resampled': resampled,
                     'rejuvenated': rejuvenated,
                     'weights': hypotheses.weights.tolist(),
-                    'hypotheses': hypotheses.texts[:3]  # 只保存前3个假设
+                    'hypotheses': hypotheses.texts[:3]
                 }
 
                 if self.data_manager:
