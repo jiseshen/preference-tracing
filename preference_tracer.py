@@ -10,17 +10,19 @@ from tqdm import tqdm
 import pandas as pd
 from datasets import load_dataset
 
+from data.base import UserData
+
 sys.path.append(os.path.join(os.path.dirname(__file__), "thought-tracing"))
 from agents.load_model import load_model
 from hypothesis import HypothesesSetV3, compute_ess, resample_hypotheses_with_other_info
-from utils import softmax, prompting_for_ordered_list, overall_jaccard_similarity
+from utils_tt import softmax, prompting_for_ordered_list, overall_jaccard_similarity
 
 from rich import print, box
 from rich.panel import Panel
 from rich.console import Console
 
 from checkpoint_manager import CheckpointManager
-from data_manager import DataManager
+from utils.data_manager import DataManager
 
 console = Console()
 
@@ -93,7 +95,8 @@ class PreferenceTracer:
 
         if should_print:
             console.print(Panel(f"[bold cyan]Initializing hypotheses for user {user_id}[/bold cyan]", style="cyan"))
-
+            console.print(Panel(prompt, title="Context for Hypothesis Initialization", style="blue", box=box.SIMPLE_HEAD))
+            
         if self.data_manager:
             self.data_manager.log(f"=== Initializing Hypotheses for User {user_id} ===")
 
@@ -209,8 +212,13 @@ class PreferenceTracer:
 
         system_prompt = (
             "You evaluate how likely a user would choose a specific response given their preference. "
-            f"Use the provided options exactly: {options_str}. "
-            "A comparison summary is provided. Assess the likelihood directly and output: 'Answer: <the answer letter>'."
+            f"Options:\n{options_str}\n\n"
+            "IMPORTANT: You MUST use this exact format:\n"
+            "Reasoning: [Your brief analysis in 1-2 sentences comparing the candidates]\n"
+            "Answer: (letter)\n\n"
+            "Example:\n"
+            "Reasoning: The chosen response aligns well with the user's preference for detailed explanations.\n"
+            "Answer: (a)"
         )
 
         likelihood_prompts = []
@@ -219,21 +227,25 @@ class PreferenceTracer:
                 f"<user message>\n{user_query}\n</user message>\n\n"
                 f"<preference>\n{hypothesis}\n</preference>\n\n"
                 f"<available responses>\n{candidates_str}\n</available responses>\n\n"
-                f"<comparison summary>\n{comparison_summary}\n</comparison summary>\n\n"
                 f"How likely would the user choose the [CHOSEN] response given their preference?"
             )
             likelihood_prompts.append(prompt)
         
-        raw_predictions = self.tracer_model.batch_interact(likelihood_prompts, temperature=0, system_prompts=system_prompt, max_tokens=32)
+        raw_predictions = self.tracer_model.batch_interact(likelihood_prompts, temperature=0, system_prompts=system_prompt, max_tokens=256)
 
         reasonings = []
         answers = []
         for response in raw_predictions:
-            reasoning = response.strip()
-            option_letter = self.extract_option_letter(response)
-            if 'Answer:' in response or 'answer:' in response:
+            # Try to extract reasoning and answer separately
+            reasoning_match = re.search(r'(?i)reasoning:\s*(.*?)(?=\n\s*answer:|\Z)', response, re.DOTALL)
+            if reasoning_match:
+                reasoning = reasoning_match.group(1).strip()
+            else:
+                # Fallback: extract everything before "Answer:"
                 parts = re.split(r'(?i)answer:', response, maxsplit=1)
-                reasoning = parts[0].strip()
+                reasoning = parts[0].replace('Reasoning:', '').strip()
+
+            option_letter = self.extract_option_letter(response)
             reasonings.append(reasoning)
             answers.append(option_letter)
         
@@ -286,10 +298,22 @@ class PreferenceTracer:
 
     def extract_option_letter(self, response: str, default: str = 'c') -> str:
         """Extract an option letter (a-f) from a model response, accepting parentheses or plain letters."""
-        answer_sections = re.findall(r'(?i)answer:\s*(.*)', response)
+        # First, try to find answer after "Answer:" line
+        answer_sections = re.findall(r'(?i)answer:\s*(.+?)(?:\n|$)', response)
         search_space = answer_sections[-1] if answer_sections else response
-        match = re.search(r'\(([a-f])\)', search_space, re.IGNORECASE) or re.search(r'\b([a-f])\b', search_space, re.IGNORECASE)
-        return match.group(1).lower() if match else default
+
+        # Priority 1: Match (a) format
+        match = re.search(r'\(([a-f])\)', search_space, re.IGNORECASE)
+        if match:
+            return match.group(1).lower()
+
+        # Priority 2: Match standalone letter
+        match = re.search(r'\b([a-f])\b', search_space, re.IGNORECASE)
+        if match:
+            return match.group(1).lower()
+
+        # Fallback to default
+        return default
 
     def map_response_to_score(self, response: str, mapping: dict) -> float:
         letter = response.strip().lower()
@@ -462,7 +486,7 @@ class PreferenceTracer:
             formatted.append(f"{prefix}{text}{chosen_mark}")
         return "\n".join(formatted)
 
-    def trace_user_preferences(self, user_bundle: Dict) -> Dict:
+    def trace_user_preferences(self, user_bundle: UserData) -> Dict:
         """
         Trace preferences for a user across multiple conversations.
         The user_bundle format is produced by prism_adapter.load_prism_users():
@@ -472,8 +496,8 @@ class PreferenceTracer:
         }
         For each new conversation, we reset history (contexts/perceptions) but keep hypotheses.
         """
-        user_id = user_bundle['user_id']
-        conversations = user_bundle['conversations']
+        user_id = user_bundle.user_id
+        conversations = user_bundle.conversations
 
         hypotheses = None
         turn_results = []
@@ -496,16 +520,16 @@ class PreferenceTracer:
         
         global_turn_idx = 0
         for conv_idx, conv in enumerate(conversations):
-            conv_turns = conv['turns']
+            conv_turns = conv.turns
             # New conversation boundary: reset contexts/perceptions but keep beliefs; keep profile across conversations
             if hypotheses is not None:
                 hypotheses = self.reset_hypotheses_for_new_conversation(hypotheses)
                 if self.data_manager:
                     self.data_manager.log(f"\n=== New conversation: {conv.get('conversation_id', conv_idx)} (contexts reset, profile retained) ===")
             for t_idx_within, turn_data in enumerate(conv_turns):
-                user_msg = turn_data['user_message']
-                candidates = turn_data['candidates']
-                chosen_response = turn_data['chosen']
+                user_msg = turn_data.user_message
+                candidates = turn_data.candidates
+                chosen_response = turn_data.chosen
                 
                 if not user_msg or not candidates or not chosen_response:
                     continue
@@ -746,12 +770,12 @@ def run_preference_tracing(args):
     save_logs = hasattr(args, 'print') and args.print
     data_manager = DataManager(args.output_dir, args.run_id, save_logs=save_logs)
 
-    from prism_adapter import load_prism_users
-    users = load_prism_users(n_users=args.n_users)
+    from data.prism import load_prism
+    users = load_prism(n_users=args.n_users)
 
     tracer = PreferenceTracer(args, data_manager=data_manager)
 
-    all_user_ids = [u['user_id'] for u in users]
+    all_user_ids = [u.user_id for u in users]
     pending_users = checkpoint_manager.get_pending_users(all_user_ids)
     
     if not pending_users:
@@ -768,7 +792,7 @@ def run_preference_tracing(args):
     all_results = []
     
     # Process users (only pending ones)
-    user_map = {u['user_id']: u for u in users}
+    user_map = {u.user_id: u for u in users}
 
     for user_id in tqdm(pending_users, desc="Tracing users"):
         if user_id not in user_map:

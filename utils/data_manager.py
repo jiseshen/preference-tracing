@@ -1,12 +1,10 @@
-"""
-数据管理器 - 管理所有追踪数据和评估指标的保存
-"""
 import os
 import json
 from datetime import datetime
 from typing import Dict, List, Any
 from contextlib import redirect_stdout
 import io
+import sys
 
 class DataManager:
     def __init__(self, output_dir: str, run_id: str, save_logs: bool = True):
