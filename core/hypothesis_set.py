@@ -3,7 +3,7 @@ FAISS-based vector store utility.
 
 Used by Memory Module for experience storage and retrieval.
 """
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from collections import OrderedDict
 from dataclasses import dataclass
 import logging
@@ -18,11 +18,23 @@ class Hypothesis:
     category: str
     content: str
     
+    def format(self) -> str:
+        return f"ID: {self.id}\nCategory: {self.category}\nContent: {self.content}\n"
+    
 @dataclass
 class Update:
     id: str
+    category: Optional[str] = None
     content: str
-    likelihood: float
+    likelihood: float = None
+    
+@dataclass
+class RepoConfig:
+    backend: str = "openai"
+    model: str = "text-embedding-3-small"
+    dim: int = 1536
+    metric: str = "ip"
+    capacity: int = 1000
 
 def embed(
     text: str,
@@ -289,33 +301,32 @@ class HypothesisSet:
     def __init__(
         self,
         *,
-        n_hypotheses: int = 5,
-        backend: str = "openai",
-        model: str = "text-embedding-3-small",
-        dim: int = 1536,
-        metric: str = "ip",
-        capacity: int = 1000,
+        cfg: Optional[RepoConfig] = None
     ) -> None:
+        cfg = cfg or RepoConfig()
         self.vector_store = VectorStore(
-            backend=backend,
-            model=model,
-            dim=dim,
-            metric=metric,
-            capacity=capacity,
+            backend=cfg.backend,
+            model=cfg.model,
+            dim=cfg.dim,
+            metric=cfg.metric,
+            capacity=cfg.capacity,
             use_keys=True,
         )
-        self.n_hypotheses = n_hypotheses
         self.global_prior: Dict[str, float] = {}
         self.hypotheses: Dict[str, Hypothesis] = {}
         self.category_counts: Dict[str, int] = {}
     
-    def __getitem__(self, key: str) -> Hypothesis:
-        return self.hypotheses[key]
+    def __getitem__(self, key: str | List[str]) -> Union[Tuple[Hypothesis, float], Tuple[List[Hypothesis], List[float]]]:
+        if isinstance(key, list):
+            return [self.hypotheses[k] for k in key], [self.global_prior[k] for k in key]
+        else:
+            return self.hypotheses[key], self.global_prior[key]
     
     def add_hypotheses(
         self,
         hypotheses: List[Dict]
     ):
+        hids = []
         for hyp in hypotheses:
             cat = hyp['category']
             self.category_counts[cat] = self.category_counts.get(cat, 0) + 1
@@ -329,6 +340,8 @@ class HypothesisSet:
             self.hypotheses[hid] = h
             self.global_prior[hid] = 1.0
             self.vector_store.store(h.content, key=hid)
+            hids.append(hid)
+        return hids
             
     def retrieve_hypotheses(
         self,
@@ -341,11 +354,13 @@ class HypothesisSet:
     
     def update_hypotheses(
         self,
-        updates: List[Dict]
+        updates: List[Union[Update, Hypothesis]]
     ):
         for update in updates:
-            hid = update['id']
+            hid = update.id
             hyp = self.hypotheses[hid]
+            if update.category is not None:
+                hyp.category = update.category
             hyp.content = update.content
             self.vector_store.update(hid, hyp.content)
             
@@ -423,7 +438,6 @@ class WorkingBelief:
         new_ids = np.random.choice(self.ids, size=len(self.ids), replace=True, p=self.weights)
         new_weights = np.ones_like(self.weights) / len(self.weights)
         self.ids = new_ids.tolist()
-        self.hypotheses = [self.repo.hypotheses[hid] for hid in self.ids]
         self.weights = new_weights
     
     def get_similarity_groups(self, threshold: float = 0.8) -> List[List[str]]:

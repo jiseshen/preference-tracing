@@ -1,4 +1,5 @@
 from openai import OpenAI, AsyncOpenAI, APIError, RateLimitError
+from .base import BaseModel
 from dataclasses import dataclass, replace
 from typing import Optional, Union, Tuple, List, Dict, Any
 import json
@@ -12,17 +13,20 @@ REASONING_BUDGETS = {"none": 0, "minimal": 32, "low": 128, "medium": 256, "high"
 
 @dataclass(frozen=True)
 class GenerationConfig:
-    model: str = "gpt-4o"
+    model: str = "gpt-5-nano"
     max_tokens: int = 128
     temperature: float = 0.0
-    reasoning_effort: str = "low"
+    reasoning_effort: str = "minimal"
     reasoning_summary: Optional[str] = None
     verbosity: str = "low"
     max_retries: int = 3
     retry_delay: float = 0.5
+    completion_window: str = "24h"
+    poll_interval: float = 60.0
+    timeout: Optional[float] = None
     
 
-class OpenAIModel:
+class OpenAIModel(BaseModel):
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None, model: str = "gpt-4o"):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY", "empty")
         self.base_url = base_url or os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
@@ -58,7 +62,7 @@ class OpenAIModel:
             kwargs["temperature"] = cfg.temperature
         return kwargs
     
-    def generate(self, prompt: str, cfg: Optional[GenerationConfig] = None, **overrides) -> Union[str, dict]:
+    def generate(self, prompt: str, cfg: Optional[GenerationConfig] = None, **overrides) -> Dict[str, str]:
         cfg = self._resolve_cfg(cfg, overrides)
         retries = cfg.max_retries
         kwargs = self._build_responses_kwargs(prompt, cfg)
@@ -72,12 +76,12 @@ class OpenAIModel:
                 continue
             if cfg.reasoning_summary:
                 return {"output": resp.output_text, "reasoning": resp.output[0].summary[0].text}
-            return resp.output_text
+            return {"output": resp.output_text}
     
-    async def async_generate(self, prompts: list[str], cfg: Optional[GenerationConfig] = None, concurrency: int = 5, return_exceptions: bool = True, **overrides) -> list[Union[str, dict, Exception]]:
+    async def async_generate(self, prompts: list[str], cfg: Optional[GenerationConfig] = None, concurrency: int = 5, return_exceptions: bool = True, **overrides) -> list[Union[Dict[str, str], Exception]]:
         cfg = self._resolve_cfg(cfg, overrides)
         sem = asyncio.Semaphore(concurrency)
-        async def _one(prompt: str) -> Union[str, dict]:
+        async def _one(prompt: str) -> Union[Dict[str, str], Exception]:
             async with sem:
                 retries = cfg.max_retries
                 for attempt in range(retries):
@@ -91,7 +95,7 @@ class OpenAIModel:
                         continue
                     if cfg.reasoning_summary:
                         return {"output": resp.output_text, "reasoning": resp.output[0].summary[0].text}
-                    return resp.output_text
+                    return {"output": resp.output_text}
         tasks = [_one(p) for p in prompts]
         return await asyncio.gather(*tasks, return_exceptions=return_exceptions)
         
@@ -107,11 +111,10 @@ class OpenAIModel:
     def submit_responses_batch(
         self,
         prompts: List[str],
-        *,
         cfg: Optional[GenerationConfig] = None,
         custom_ids: Optional[List[str]] = None,
-        completion_window: str = "24h",
         metadata: Optional[Dict[str, str]] = None,
+        **overrides
     ) -> str:
         """
         Submit a batch job for /v1/responses.
@@ -119,7 +122,7 @@ class OpenAIModel:
         Returns:
             batch_id (str)
         """
-        cfg = self._resolve_cfg(cfg, {})
+        cfg = self._resolve_cfg(cfg, overrides)
         if custom_ids is None:
             custom_ids = [f"req-{i}" for i in range(len(prompts))]
         if len(custom_ids) != len(prompts):
@@ -138,7 +141,7 @@ class OpenAIModel:
         batch = self.client.batches.create(
             input_file_id=in_file.id,
             endpoint="/v1/responses",
-            completion_window=completion_window,
+            completion_window=cfg.completion_window,
             metadata=metadata or {},
         )
         return batch.id
@@ -146,9 +149,8 @@ class OpenAIModel:
     def poll_batch_until_done(
         self,
         batch_id: str,
-        *,
-        poll_interval_s: float = 2.0,
-        timeout_s: Optional[float] = None,
+        poll_interval: float = 60.0,
+        timeout: Optional[float] = None
     ):
         """
         Poll batch status until it reaches a terminal state.
@@ -162,14 +164,14 @@ class OpenAIModel:
             if status in ("completed", "failed", "cancelled", "expired"):
                 return batch
 
-            if timeout_s is not None and (time.time() - start) > timeout_s:
-                raise TimeoutError(f"Batch {batch_id} polling timed out after {timeout_s}s")
+            if timeout is not None and (time.time() - start) > timeout:
+                raise TimeoutError(f"Batch {batch_id} polling timed out after {timeout}s")
 
-            time.sleep(poll_interval_s)
+            time.sleep(poll_interval)
 
     def fetch_batch_outputs(
         self,
-        batch_obj,
+        batch_obj
     ) -> Tuple[Dict[str, str], Dict[str, Any]]:
         """
         Download output_file_id and parse JSONL.
@@ -199,3 +201,21 @@ class OpenAIModel:
             outputs[cid] = out_text if isinstance(out_text, str) else str(out_text)
 
         return outputs, raw
+    
+    def batch_generate(
+        self,
+        prompts: List[str],
+        cfg: Optional[GenerationConfig] = None,
+        custom_ids: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        **overrides
+    ):
+        batch_id = self.submit_responses_batch(
+            prompts,
+            cfg=cfg,
+            custom_ids=custom_ids,
+            metadata=metadata,
+            **overrides
+        )
+        batch_obj = self.poll_batch_until_done(batch_id, poll_interval=cfg.poll_interval, timeout=cfg.timeout)
+        return self.fetch_batch_outputs(batch_obj)
