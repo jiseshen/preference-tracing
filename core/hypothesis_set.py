@@ -1,8 +1,3 @@
-"""
-FAISS-based vector store utility.
-
-Used by Memory Module for experience storage and retrieval.
-"""
 from typing import Any, Dict, List, Optional, Tuple, Union
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -25,7 +20,7 @@ class Hypothesis:
 class Update:
     id: str
     category: Optional[str] = None
-    content: str
+    content: Optional[str] = None
     likelihood: float = None
     
 @dataclass
@@ -361,8 +356,9 @@ class HypothesisSet:
             hyp = self.hypotheses[hid]
             if update.category is not None:
                 hyp.category = update.category
-            hyp.content = update.content
-            self.vector_store.update(hid, hyp.content)
+            if update.content is not None:
+                hyp.content = update.content
+                self.vector_store.update(hid, hyp.content)
             
     def get_similarity(
         self,
@@ -460,3 +456,7 @@ class WorkingBelief:
     
     def consolidate(self, importance: float = 0.5, alpha: float = 0.5):
         self.repo.consolidate_belief(self.ids, self.weights, importance=importance, alpha=alpha)
+        
+    def resample(self):
+        self.ids = np.random.choice(self.ids, size=len(self.ids), replace=True, p=self.weights).tolist()
+        self.weights = np.ones_like(self.weights) / len(self.weights)

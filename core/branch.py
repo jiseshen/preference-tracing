@@ -118,7 +118,7 @@ def branch_hypotheses(conversation_history: List[Turn], context: TracerContext) 
             current_hypothesis=h.format()
         ) for h in current_hypotheses
     ]
-    outputs = [o["output"] for o in context.model.batch_generate(prompts, cfg=context.generation_config)]
+    outputs = [o["output"] for o in context.model.async_generate(prompts, cfg=context.generation_config)]
     
     skip, replace, invalid = 0, 0, 0
     for output in outputs:
