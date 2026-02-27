@@ -8,8 +8,9 @@ from .hypothesis_set import HypothesisSet, WorkingBelief
 class TracerConfig:
     n_hypotheses: int = 5
     importance: float = 0.5
-    alpha: float = 0.5
+    consolidate_alpha: float = 0.5
     similarity_threshold: float = 0.8
+    perturb_alpha: float = 0.3
     max_history_turns: int = 3
 
 

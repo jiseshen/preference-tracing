@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 from collections import OrderedDict
 from dataclasses import dataclass
 import logging
@@ -329,11 +329,13 @@ class HypothesisSet:
             h = Hypothesis(
                 id=hid,
                 category=cat,
-                content=hyp['content'],
-                weight=1.0
+                content=hyp['content']
             )
             self.hypotheses[hid] = h
-            self.global_prior[hid] = 1.0
+            if 'prior' in hyp:
+                self.global_prior[hid] = hyp['prior']
+            else:
+                self.global_prior[hid] = 1.0
             self.vector_store.store(h.content, key=hid)
             hids.append(hid)
         return hids
@@ -398,7 +400,7 @@ class HypothesisSet:
         self,
         ids: List[str],
         weights: np.ndarray,
-        importance: float = 0.5,
+        importance: float = 0.5,  # importance of current conversation, in terms of valid length or other heuristics
         alpha: float = 0.5
     ):
         for hid, w in zip(ids, weights):
@@ -418,6 +420,18 @@ class WorkingBelief:
         self.weights /= (self.weights.sum() + 1e-14)
         self.repo = repo
     
+    def __getitem__(self, idx: int | Iterable) -> Tuple[Hypothesis | List[Hypothesis], float | np.ndarray]:
+        if isinstance(idx, int):
+            hid = self.ids[idx]
+            hyp = self.repo.hypotheses[hid]
+            weight = self.weights[idx]
+            return hyp, weight
+        else:
+            hids = [self.ids[i] for i in idx]
+            hyps = [self.repo.hypotheses[hid] for hid in hids]
+            weights = self.weights[list(idx)]
+            return hyps, weights
+    
     def get_hypotheses(self) -> List[Hypothesis]:
         return [self.repo.hypotheses[hid] for hid in self.ids]
     
@@ -430,33 +444,30 @@ class WorkingBelief:
     def ess(self) -> float:
         return 1.0 / np.sum(self.weights ** 2)
     
-    def resample(self):
-        new_ids = np.random.choice(self.ids, size=len(self.ids), replace=True, p=self.weights)
-        new_weights = np.ones_like(self.weights) / len(self.weights)
+    def resample(self) -> List[List[int]]:
+        new_ids: np.ndarray = np.random.choice(self.ids, size=len(self.ids), replace=True, p=self.weights)
         self.ids = new_ids.tolist()
-        self.weights = new_weights
+        self.weights = np.ones_like(self.weights) / len(self.ids)
+        
+        pos = {}
+        for i, hid in enumerate(self.ids):
+            pos.setdefault(hid, []).append(i)
+        return list(pos.values())
     
-    def get_similarity_groups(self, threshold: float = 0.8) -> List[List[str]]:
+    def get_similarity_groups(self, threshold: float = 0.8) -> List[List[int]]:
         similar_groups = []
         checked = set()
         for i, hid in enumerate(self.ids):
-            if hid in checked:
+            if i in checked:
                 continue
-            group = [hid]
-            checked.add(hid)
-            has_similar = False
-            for other_hid in self.ids[i+1:]:
-                if other_hid not in checked and self.repo.get_similarity(hid, other_hid) > threshold:
-                    group.append(other_hid)
-                    checked.add(other_hid)
-                    has_similar = True
-            if has_similar:
-                similar_groups.append(group)
+            group = [i]
+            checked.add(i)
+            for j, other_hid in enumerate(self.ids[i+1:], i+1):
+                if j not in checked and self.repo.get_similarity(hid, other_hid) > threshold:
+                    group.append(j)
+                    checked.add(j)
+            similar_groups.append(group)
         return similar_groups
     
     def consolidate(self, importance: float = 0.5, alpha: float = 0.5):
         self.repo.consolidate_belief(self.ids, self.weights, importance=importance, alpha=alpha)
-        
-    def resample(self):
-        self.ids = np.random.choice(self.ids, size=len(self.ids), replace=True, p=self.weights).tolist()
-        self.weights = np.ones_like(self.weights) / len(self.weights)
